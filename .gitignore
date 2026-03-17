@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+out/
+
+# Secrets
+.env
+.env.local
+
+# OS
+.DS_Store
+
+# Test/debug artifacts
+*.mp4
+*.webm
+*.jpg
+*.png
+real_monalisa.jpg
+path/
+build.log
+build.txt
+huh.txt
