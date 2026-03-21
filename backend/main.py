@@ -2,8 +2,9 @@ from fastapi import FastAPI, File, UploadFile, Request, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from backend.video_detector import VideoDeepfakeDetector
+from backend.frame_classifier import FrameClassifier
 from backend.text_detector import detect_phishing, detect_deepfake_text, detect_text_pro
-from backend.fusion_engine import fusion_engine, calibrate_score
+from backend.fusion_engine import fusion_engine, calibrate
 from backend.decision_engine import decision_engine
 from backend.explainability import explainability
 import os
@@ -34,6 +35,7 @@ app.add_middleware(
 )
 
 video_detector = VideoDeepfakeDetector()
+CURRENT_MODE = "lite"  # Track mode for health dashboard
 
 
 @app.on_event("startup")
@@ -80,8 +82,16 @@ async def analyze_video(file: UploadFile = File(...), mode: str = Form("lite")):
             tmp.write(await file.read())
             video_path = tmp.name
 
+        global CURRENT_MODE
+        CURRENT_MODE = mode
         start = time.time()
-        result = video_detector.detect(video_path, mode=mode)
+        if mode == "pro":
+            detector = VideoDeepfakeDetector(
+                classifier=FrameClassifier(model_type="xception_ffpp")
+            )
+            result = detector.detect(video_path, mode=mode)
+        else:
+            result = video_detector.detect(video_path, mode=mode)
         analysis_time = round(time.time() - start, 2)
 
         try:
@@ -99,7 +109,7 @@ async def analyze_video(file: UploadFile = File(...), mode: str = Form("lite")):
         reason     = result.get("reason", "Temporal analysis complete")
 
         fused_score = fusion_engine(fake_prob, 0.0, face_count=len(faces))
-        calibrated_prob = calibrate_score(fused_score)
+        calibrated_prob = calibrate(fused_score)
 
         api_label, confidence_pct = _label_and_conf(calibrated_prob)
         decision = decision_engine(calibrated_prob)
@@ -126,7 +136,8 @@ async def analyze_video(file: UploadFile = File(...), mode: str = Form("lite")):
                 "modelMode":       mode,
                 "inferenceType":   "cloud" if mode == "pro" else "local",
                 "fps":             round(frames_analyzed / analysis_time, 2) if analysis_time > 0 else 0.0,
-                "modelUsed":       "EfficientNet-B7" if mode == "pro" else "MediaPipe Heuristics",
+                "modelUsed":       video_detector.get_model_name(),
+                "model":           "Xception-FFPP" if mode == "pro" else video_detector.get_model_name(),
             },
         })
 
@@ -154,6 +165,8 @@ async def analyze_frame(request: Request):
             return JSONResponse(content={"error": "Failed to decode image"}, status_code=400)
 
         mode = body.get("mode", "lite")
+        global CURRENT_MODE
+        CURRENT_MODE = mode
         result = video_detector.classify_frame_live(frame, mode=mode)
         faces = result.get("faces", [])
         fake_prob = float(result.get("score", 0.0))
@@ -180,13 +193,14 @@ async def analyze_frame(request: Request):
                     "modelMode":     mode,
                     "inferenceType": "cloud" if mode == "pro" else "local",
                     "fps":           0.0,
-                    "modelUsed":     "EfficientNet-B7" if mode == "pro" else "MediaPipe Heuristics",
+                    "modelUsed":     video_detector.get_model_name(),
+                    "model":         video_detector.get_model_name(),
                 },
             })
 
 
         fused_score = fusion_engine(fake_prob, 0.0, face_count=len(faces))
-        calibrated_prob = calibrate_score(fused_score)
+        calibrated_prob = calibrate(fused_score)
 
         api_label, confidence_pct = _label_and_conf(calibrated_prob)
         decision = decision_engine(calibrated_prob)
@@ -215,7 +229,8 @@ async def analyze_frame(request: Request):
                 "modelMode":     mode,
                 "inferenceType": "cloud" if mode == "pro" else "local",
                 "fps":           round(1.0 / analysis_time, 2) if analysis_time > 0 else 0.0,
-                "modelUsed":     "EfficientNet-B7" if mode == "pro" else "MediaPipe Heuristics",
+                "modelUsed":     video_detector.get_model_name(),
+                "model":         video_detector.get_model_name(),
             },
         })
 
@@ -242,6 +257,8 @@ async def analyze_text(request: Request, file: UploadFile = File(None)):
             text = (await request.body()).decode("utf-8")
 
         phishing_score  = detect_phishing(text)
+        global CURRENT_MODE
+        CURRENT_MODE = mode
         if mode == "pro":
             res = detect_text_pro(text)
             deepfake_score = res["score"]
@@ -251,7 +268,7 @@ async def analyze_text(request: Request, file: UploadFile = File(None)):
             llm_reason = None
 
         fused_score     = fusion_engine(0.0, deepfake_score)
-        calibrated_prob = calibrate_score(fused_score)
+        calibrated_prob = calibrate(fused_score)
         decision        = decision_engine(calibrated_prob)
         explanation     = explainability(calibrated_prob, data_type="text", data=text, mode=mode)
         api_label, confidence_pct = _label_and_conf(calibrated_prob)
@@ -292,14 +309,15 @@ async def health():
         "edgeMode":          "enabled",
         "inferenceDevice":   "CPU/MPS/CUDA",
         "latency":           0,
-        "model":             "EfficientNet-B7",
+        "model":             "Xception-FFPP" if CURRENT_MODE == "pro" else "Lite-Heuristic",
         "liveStreamEnabled": True,
         "metrics": {
             "framesAnalyzed": 0,
             "facesDetected": 0,
             "latency": 0.0,
-            "modelMode": "lite",
+            "modelMode": CURRENT_MODE,
             "inferenceType": "local",
             "fps": 0.0,
+            "modelUsed": "Xception-FFPP" if CURRENT_MODE == "pro" else "Lite-Heuristic",
         },
     })

@@ -11,13 +11,14 @@ mp_face_detection = mp.solutions.face_detection
 
 
 class VideoDeepfakeDetector:
-    def __init__(self):
+    def __init__(self, classifier=None):
         self.face_detector = mp_face_detection.FaceDetection(
             model_selection=1, min_detection_confidence=0.5
         )
-        self.classifier = FrameClassifier()
-        # Smooth over the last 15 per-face scores for live webcam
         self.smoothing_window = collections.deque(maxlen=15)
+        self.classifier = classifier or FrameClassifier()
+        # Initialize Xception for Pro mode on demand or pre-load
+        self.pro_classifier = FrameClassifier(model_type="xception_ffpp")
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -64,27 +65,31 @@ class VideoDeepfakeDetector:
 
     # ── single-frame classification ──────────────────────────────────────────
 
-    def classify_frame(self, frame):
+    def classify_frame(self, frame, mode: str = "lite"):
         """
         Detect all faces in frame, classify each, and return aggregate info.
 
         Returns:
             {
-              "score": float | None,   # None when no face detected
+              "score": float | None,   # Aggregated score (normalized 0-1)
               "faces": [{"bbox": [...], "score": float}, ...],
               "face_found": bool,
             }
         """
         detections = self.detect_faces(frame)
-        faces = []
 
+        faces = []
+        # Use pro_classifier if mode is pro
+        clf = self.pro_classifier if mode == "pro" else self.classifier
+        
         for det in detections:
-            crop = self._crop_face(frame, det)
-            if crop is None:
-                continue
-            score = self.classifier.classify(crop)
             x, y, bw, bh = self._box_coords(frame, det)
-            faces.append({"bbox": [x, y, bw, bh], "score": float(score)})
+            crop = self._crop_face(frame, det)
+            if crop is not None:
+                score = clf.classify(crop)
+            else:
+                score = 0.5
+            faces.append({"bbox": [x, y, bw, bh], "score": score})
 
         if faces:
             avg = float(np.mean([f["score"] for f in faces]))
@@ -95,12 +100,12 @@ class VideoDeepfakeDetector:
 
     # ── uploaded video analysis ───────────────────────────────────────────────
 
-    def detect(self, video_path: str):
+    def detect(self, video_path: str, mode: str = "lite"):
         """
-        Analyse an uploaded video: sample up to 40 evenly-spaced frames,
-        classify each face crop, and return temporal aggregate metrics.
+        Analyse an uploaded video: sample 3-5 evenly-spaced frames,
+        classify each face crop, and return stabilized aggregate metrics.
         """
-        logger.info("Step 1/4: Opening video")
+        logger.info(f"Step 1/4: Opening video")
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise IOError(f"Could not open video: {video_path}")
@@ -115,54 +120,46 @@ class VideoDeepfakeDetector:
 
         logger.info(f"Step 2/4: Sampling from {len(frames)} total frames")
 
-        all_scores = []
-        all_faces = []
+        scores = []
+        combined_faces = []
 
+        num_samples = 0
         if frames:
-            num_samples = min(40, len(frames))
+            num_samples = min(5, max(3, len(frames)))
             indices = np.linspace(0, len(frames) - 1, num_samples, dtype=int)
             for i in indices:
-                result = self.classify_frame(frames[i])
-                all_faces.extend(result["faces"])
-                # Only accumulate when a face was actually detected
+                result = self.classify_frame(frames[i], mode=mode)
+                combined_faces.extend(result["faces"])
                 if result["score"] is not None:
-                    all_scores.append(result["score"])
+                    scores.append(result["score"])
 
-        logger.info(f"Step 3/4: Scored {len(all_scores)} frames with detected faces")
+        logger.info(f"Step 3/4: Scored {len(scores)} frames with detected faces")
 
-        if all_scores:
-            mean_score   = float(np.mean(all_scores))
-            median_score = float(np.median(all_scores))
-            std_score    = float(np.std(all_scores))
-            final_score  = mean_score  # mean over all valid frames
+        if scores:
+            final_score = float(np.mean(scores))
         else:
-            mean_score = median_score = final_score = 0.5
-            std_score = 0.0
+            final_score = 0.5
+
+        final_score = float(np.clip(final_score, 0.0, 1.0))
 
         logger.info(
-            f"Step 4/4: Aggregated – mean={mean_score:.4f}, "
-            f"median={median_score:.4f}, final={final_score:.4f}"
+            f"Step 4/4: Aggregated – final={final_score:.4f}"
         )
 
         return {
-            "video_score":           final_score,
-            "mean_fake_probability": mean_score,
-            "median_fake_probability": median_score,
-            "std_fake_probability":  std_score,
-            "frame_scores":          all_scores,
-            "frames_analyzed":       len(frames),
-            "faces":                 all_faces,
-            "reason": "Temporal facial artefact analysis — EfficientNet-B7 + MediaPipe",
+            "score": final_score,
+            "faces": combined_faces,
+            "framesAnalyzed": len(scores)
         }
 
     # ── live-webcam helper ────────────────────────────────────────────────────
 
-    def classify_frame_live(self, frame):
+    def classify_frame_live(self, frame, mode: str = "lite"):
         """
         Classify a single live-webcam frame and maintain temporal smoothing.
         Returns the smoothed fake_probability plus raw face data.
         """
-        result = self.classify_frame(frame)
+        result = self.classify_frame(frame, mode=mode)
 
         # Only push confident detections into the window
         if result["face_found"] and result["score"] is not None:
@@ -178,3 +175,4 @@ class VideoDeepfakeDetector:
             "faces":   result["faces"],
             "face_found": result["face_found"],
         }
+
