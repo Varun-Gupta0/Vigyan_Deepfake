@@ -1,9 +1,9 @@
-from fastapi import FastAPI, File, UploadFile, Request
+from fastapi import FastAPI, File, UploadFile, Request, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from backend.video_detector import VideoDeepfakeDetector
-from backend.text_detector import detect_phishing, detect_deepfake_text
-from backend.fusion_engine import fusion_engine
+from backend.text_detector import detect_phishing, detect_deepfake_text, detect_text_pro
+from backend.fusion_engine import fusion_engine, calibrate_score
 from backend.decision_engine import decision_engine
 from backend.explainability import explainability
 import os
@@ -13,6 +13,9 @@ import time
 import base64
 import cv2
 import numpy as np
+from dotenv import load_dotenv
+
+load_dotenv(".env.local")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,6 +40,19 @@ video_detector = VideoDeepfakeDetector()
 async def startup_event():
     logger.info("VERI-AI EDGE startup complete.")
 
+@app.get("/")
+async def root():
+    return JSONResponse(content={
+        "message": "Welcome to the VERI-AI EDGE API",
+        "docs": "/docs",
+        "health": "/health",
+        "status": "online"
+    })
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return JSONResponse(content={})
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -58,14 +74,14 @@ def _label_and_conf(fake_prob: float):
 # ── /analyze/video ────────────────────────────────────────────────────────────
 
 @app.post("/analyze/video")
-async def analyze_video(file: UploadFile = File(...)):
+async def analyze_video(file: UploadFile = File(...), mode: str = Form("lite")):
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             tmp.write(await file.read())
             video_path = tmp.name
 
         start = time.time()
-        result = video_detector.detect(video_path)
+        result = video_detector.detect(video_path, mode=mode)
         analysis_time = round(time.time() - start, 2)
 
         try:
@@ -82,30 +98,35 @@ async def analyze_video(file: UploadFile = File(...)):
         faces      = result.get("faces", [])
         reason     = result.get("reason", "Temporal analysis complete")
 
-        api_label, confidence_pct = _label_and_conf(fake_prob)
-        decision = decision_engine(fake_prob)
-        explanation = explainability(fake_prob, data_type="video", data=video_path)
+        fused_score = fusion_engine(fake_prob, 0.0, face_count=len(faces))
+        calibrated_prob = calibrate_score(fused_score)
+
+        api_label, confidence_pct = _label_and_conf(calibrated_prob)
+        decision = decision_engine(calibrated_prob)
+        explanation = explainability(calibrated_prob, data_type="video", data=video_path, mode=mode)
 
         return JSONResponse(content={
             "label":                  api_label,
             "confidence":             confidence_pct,
             "verdict":                _verdict(api_label),
-            "fake_probability":       round(fake_prob, 4),
-            "real_probability":       round(1.0 - fake_prob, 4),
+            "fake_probability":       round(calibrated_prob, 4),
+            "real_probability":       round(1.0 - calibrated_prob, 4),
             "mean_fake_probability":  round(mean_prob, 4),
             "median_fake_probability": round(median_prob, 4),
             "std_fake_probability":   round(std_prob, 4),
             "frame_scores":           frame_scores,
             "decision":               decision.to_dict(),
-            "reason":                 reason,
+            "reason":                 explanation.get("reason", reason),
             "faces":                  faces,
-            "analysis_time_seconds":  analysis_time,
             "processing_steps":       explanation.get("processing_steps", []),
             "metrics": {
                 "framesAnalyzed":  frames_analyzed,
-                "processingTime":  analysis_time,
-                "modelUsed":       "EfficientNet-B7 + MediaPipe (Temporal)",
-                "inferenceDevice": "CPU/MPS/CUDA",
+                "facesDetected":   len(faces),
+                "latency":         round(analysis_time * 1000, 2),
+                "modelMode":       mode,
+                "inferenceType":   "cloud" if mode == "pro" else "local",
+                "fps":             round(frames_analyzed / analysis_time, 2) if analysis_time > 0 else 0.0,
+                "modelUsed":       "EfficientNet-B7" if mode == "pro" else "MediaPipe Heuristics",
             },
         })
 
@@ -119,6 +140,7 @@ async def analyze_video(file: UploadFile = File(...)):
 @app.post("/analyze/frame")
 async def analyze_frame(request: Request):
     try:
+        start_time = time.time()
         body = await request.json()
         image_b64 = body.get("image", "")
         if not image_b64:
@@ -131,12 +153,14 @@ async def analyze_frame(request: Request):
         if frame is None:
             return JSONResponse(content={"error": "Failed to decode image"}, status_code=400)
 
-        result = video_detector.classify_frame_live(frame)
+        mode = body.get("mode", "lite")
+        result = video_detector.classify_frame_live(frame, mode=mode)
         faces = result.get("faces", [])
         fake_prob = float(result.get("score", 0.0))
 
         if not result.get("face_found"):
             # No face → cannot make a determination → treat as real
+            latency_ms = round((time.time() - start_time) * 1000, 2)
             return JSONResponse(content={
                 "label":                  "REAL",
                 "confidence":             100.0,
@@ -150,31 +174,48 @@ async def analyze_frame(request: Request):
                 "decision":               {"label": "REAL", "confidence": 100.0},
                 "faces":                  [],
                 "metrics": {
+                    "framesAnalyzed": 1,
                     "facesDetected": 0,
-                    "modelUsed":     "EfficientNet-B7 + MediaPipe",
-                    "inferenceDevice": "CPU/MPS/CUDA",
+                    "latency":       latency_ms,
+                    "modelMode":     mode,
+                    "inferenceType": "cloud" if mode == "pro" else "local",
+                    "fps":           0.0,
+                    "modelUsed":     "EfficientNet-B7" if mode == "pro" else "MediaPipe Heuristics",
                 },
             })
 
-        api_label, confidence_pct = _label_and_conf(fake_prob)
-        decision = decision_engine(fake_prob)
+
+        fused_score = fusion_engine(fake_prob, 0.0, face_count=len(faces))
+        calibrated_prob = calibrate_score(fused_score)
+
+        api_label, confidence_pct = _label_and_conf(calibrated_prob)
+        decision = decision_engine(calibrated_prob)
+        explanation = explainability(calibrated_prob, data_type="video", data=None, mode=mode)
+        
+        analysis_time = time.time() - start_time
+        latency_ms = round(analysis_time * 1000, 2)
 
         return JSONResponse(content={
             "label":                  api_label,
             "confidence":             confidence_pct,
             "verdict":                _verdict(api_label),
-            "fake_probability":       round(fake_prob, 4),
-            "real_probability":       round(1.0 - fake_prob, 4),
-            "mean_fake_probability":  round(fake_prob, 4),
-            "median_fake_probability": round(fake_prob, 4),
+            "fake_probability":       round(calibrated_prob, 4),
+            "real_probability":       round(1.0 - calibrated_prob, 4),
+            "mean_fake_probability":  round(calibrated_prob, 4),
+            "median_fake_probability": round(calibrated_prob, 4),
             "std_fake_probability":   0.0,
-            "frame_scores":           [round(fake_prob, 4)],
+            "frame_scores":           [round(calibrated_prob, 4)],
             "decision":               decision.to_dict(),
+            "reason":                 explanation.get("reason", "Live analysis complete"),
             "faces":                  faces,
             "metrics": {
+                "framesAnalyzed": 1,
                 "facesDetected": len(faces),
-                "modelUsed":     "EfficientNet-B7 + MediaPipe",
-                "inferenceDevice": "CPU/MPS/CUDA",
+                "latency":       latency_ms,
+                "modelMode":     mode,
+                "inferenceType": "cloud" if mode == "pro" else "local",
+                "fps":           round(1.0 / analysis_time, 2) if analysis_time > 0 else 0.0,
+                "modelUsed":     "EfficientNet-B7" if mode == "pro" else "MediaPipe Heuristics",
             },
         })
 
@@ -188,38 +229,52 @@ async def analyze_frame(request: Request):
 @app.post("/analyze/text")
 async def analyze_text(request: Request, file: UploadFile = File(None)):
     try:
+        start_time = time.time()
         content_type = request.headers.get("content-type", "")
+        mode = "lite"
         if file is not None:
             text = (await file.read()).decode("utf-8")
         elif "application/json" in content_type:
             body = await request.json()
             text = body.get("text", "")
+            mode = body.get("mode", "lite")
         else:
             text = (await request.body()).decode("utf-8")
 
         phishing_score  = detect_phishing(text)
-        deepfake_score  = detect_deepfake_text(text)
+        if mode == "pro":
+            res = detect_text_pro(text)
+            deepfake_score = res["score"]
+            llm_reason = res["reason"]
+        else:
+            deepfake_score = detect_deepfake_text(text)
+            llm_reason = None
+
         fused_score     = fusion_engine(0.0, deepfake_score)
-        fake_prob       = float(fused_score)
-        decision        = decision_engine(fake_prob)
-        explanation     = explainability(fake_prob, data_type="text", data=text)
-        api_label, confidence_pct = _label_and_conf(fake_prob)
+        calibrated_prob = calibrate_score(fused_score)
+        decision        = decision_engine(calibrated_prob)
+        explanation     = explainability(calibrated_prob, data_type="text", data=text, mode=mode)
+        api_label, confidence_pct = _label_and_conf(calibrated_prob)
+        latency_ms = round((time.time() - start_time) * 1000, 2)
 
         return JSONResponse(content={
             "label":            api_label,
             "confidence":       confidence_pct,
             "verdict":          _verdict(api_label),
-            "fake_probability": round(fake_prob, 4),
-            "real_probability": round(1.0 - fake_prob, 4),
+            "fake_probability": round(calibrated_prob, 4),
+            "real_probability": round(1.0 - calibrated_prob, 4),
             "decision":         decision.to_dict(),
-            "reason":           explanation.get("reason", "Text analysis complete"),
+            "reason":           llm_reason if (mode == "pro" and llm_reason) else explanation.get("reason", "Text analysis complete"),
             "phishing_score":   round(phishing_score * 100, 1),
             "processing_steps": explanation.get("processing_steps", []),
             "metrics": {
                 "framesAnalyzed":  0,
-                "processingTime":  0.0,
-                "modelUsed":       "Keyword Heuristic",
-                "inferenceDevice": "CPU",
+                "facesDetected":   0,
+                "latency":         latency_ms,
+                "modelMode":       mode,
+                "inferenceType":   "cloud" if mode == "pro" else "local",
+                "fps":             0.0,
+                "modelUsed":       "Gemma-3-27B" if mode == "pro" else "RoBERTa/DistilRoBERTa",
             },
         })
 
@@ -239,4 +294,12 @@ async def health():
         "latency":           0,
         "model":             "EfficientNet-B7",
         "liveStreamEnabled": True,
+        "metrics": {
+            "framesAnalyzed": 0,
+            "facesDetected": 0,
+            "latency": 0.0,
+            "modelMode": "lite",
+            "inferenceType": "local",
+            "fps": 0.0,
+        },
     })
