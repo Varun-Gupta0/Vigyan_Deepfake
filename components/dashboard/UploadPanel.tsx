@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import axios, { CancelTokenSource } from 'axios';
-import { AnalysisResult, analyzeText, analyzeTextFile, FrameAnalysisResult } from '@/lib/api';
+import { AnalysisResult, analyzeText, analyzeTextFile, uploadVideo, FrameAnalysisResult } from '@/lib/api';
 import LiveStreamPanel from './LiveStreamPanel';
 
 interface UploadPanelProps {
@@ -47,6 +47,7 @@ const formatFileSize = (bytes: number): string => {
 
 const UploadPanel: React.FC<UploadPanelProps> = ({ onAnalysisComplete }) => {
   const [activeTab, setActiveTab] = useState<TabType>('video');
+  const [mode, setMode] = useState<'lite' | 'pro'>('lite');
   const [loading, setLoading] = useState(false);
   const [textInput, setTextInput] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -94,37 +95,27 @@ const UploadPanel: React.FC<UploadPanelProps> = ({ onAnalysisComplete }) => {
     setError(null);
 
     cancelTokenRef.current = axios.CancelToken.source();
-    const formData = new FormData();
-    formData.append('file', selectedFile);
 
     try {
-      const response = await axios.post<AnalysisResult>(
-        `${API_BASE_URL}/analyze/video`,
-        formData,
-        {
-          headers: { 'Content-Type': 'multipart/form-data' },
-          cancelToken: cancelTokenRef.current.token,
-          timeout: 120000,
-          onUploadProgress: (e) => {
-            const pct = e.total ? Math.round((e.loaded * 100) / e.total) : 0;
-            setUploadPct(pct);
-          },
-        }
+      const data = await uploadVideo(
+        selectedFile,
+        mode,
+        cancelTokenRef.current,
+        (pct) => setUploadPct(pct)
       );
-      const data = response.data;
       onAnalysisComplete?.(data, data.processing_steps ?? []);
       setSelectedFile(null);
       if (filePreview) { URL.revokeObjectURL(filePreview); setFilePreview(null); }
-    } catch (err) {
+    } catch (err: any) {
       if (axios.isCancel(err)) { setError('Upload cancelled'); }
-      else { setError('Video analysis failed. Please check the backend is running.'); }
+      else { setError(err.originalError?.message || 'Video analysis failed. Please check the backend is running.'); }
     } finally {
       setLoading(false);
       setIsUploading(false);
       setUploadPct(0);
       cancelTokenRef.current = null;
     }
-  }, [selectedFile, filePreview, onAnalysisComplete]);
+  }, [selectedFile, filePreview, mode, onAnalysisComplete]);
 
   const handleTextFileSelect = useCallback(async (file: File) => {
     const ok = file.type.startsWith('text/') || file.name.endsWith('.txt') || file.name.endsWith('.md');
@@ -144,7 +135,7 @@ const UploadPanel: React.FC<UploadPanelProps> = ({ onAnalysisComplete }) => {
     cancelTokenRef.current = axios.CancelToken.source();
 
     try {
-      const data = await analyzeText(textInput, cancelTokenRef.current);
+      const data = await analyzeText(textInput, mode, cancelTokenRef.current);
       onAnalysisComplete?.(data, data.processing_steps ?? []);
       setTextInput('');
       setTextFile(null);
@@ -193,9 +184,59 @@ const UploadPanel: React.FC<UploadPanelProps> = ({ onAnalysisComplete }) => {
     <div className="card" style={{ padding: 0 }}>
       {/* Header */}
       <div style={{ padding: '16px 20px 0' }}>
-        <div className="section-title">
-          <UploadIcon />
-          Upload &amp; Analyze
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div className="section-title">
+            <UploadIcon />
+            Upload &amp; Analyze
+          </div>
+          
+          <div style={{ 
+            display: 'flex', 
+            background: 'var(--surface)', 
+            padding: 3, 
+            borderRadius: 8, 
+            border: '1px solid var(--border)',
+            gap: 2
+          }}>
+            <button 
+              onClick={() => setMode('lite')}
+              style={{
+                padding: '4px 10px',
+                borderRadius: 6,
+                fontSize: 11,
+                fontWeight: 600,
+                border: 'none',
+                cursor: 'pointer',
+                background: mode === 'lite' ? 'var(--accent)' : 'transparent',
+                color: mode === 'lite' ? 'white' : 'var(--text-muted)',
+                transition: 'all 0.2s',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4
+              }}
+            >
+              <span>⚡</span> Lite
+            </button>
+            <button 
+              onClick={() => setMode('pro')}
+              style={{
+                padding: '4px 10px',
+                borderRadius: 6,
+                fontSize: 11,
+                fontWeight: 600,
+                border: 'none',
+                cursor: 'pointer',
+                background: mode === 'pro' ? 'var(--accent)' : 'transparent',
+                color: mode === 'pro' ? 'white' : 'var(--text-muted)',
+                transition: 'all 0.2s',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4
+              }}
+            >
+              <span>🧠</span> Pro
+            </button>
+          </div>
         </div>
 
         {/* Tabs */}
@@ -358,7 +399,10 @@ const UploadPanel: React.FC<UploadPanelProps> = ({ onAnalysisComplete }) => {
 
         {/* ── LIVE TAB ─────────────────────────────────────────────────────── */}
         {activeTab === 'live' && (
-          <LiveStreamPanel onAnalysisComplete={(result) => onAnalysisComplete?.(result, [])} />
+          <LiveStreamPanel 
+            mode={mode}
+            onAnalysisComplete={(result) => onAnalysisComplete?.(result, [])} 
+          />
         )}
 
         {/* Error */}

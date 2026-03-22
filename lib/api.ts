@@ -18,7 +18,7 @@ import axios, {
 /* -------------------------------------------------------------------------- */
 const api: AxiosInstance = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000',
-  timeout: 60000,
+  timeout: 120000,
   headers: {
     Accept: 'application/json',
     'ngrok-skip-browser-warning': 'true',
@@ -28,6 +28,8 @@ const api: AxiosInstance = axios.create({
 /* -------------------------------------------------------------------------- */
 /* Shared types                                                                */
 /* -------------------------------------------------------------------------- */
+export type AnalysisMode = 'lite' | 'pro';
+
 export interface ApiError extends Error {
   status?: number;
   originalError: AxiosError;
@@ -51,6 +53,9 @@ export interface AnalysisResult {
     facesDetected?: number;
     modelUsed: string;
     inferenceDevice: string;
+    modelMode?: AnalysisMode;
+    latency?: number;
+    fps?: number;
   };
   /** Analysis time in seconds */
   analysis_time_seconds?: number;
@@ -72,6 +77,9 @@ export interface FrameAnalysisResult {
     facesDetected?: number;
     modelUsed: string;
     inferenceDevice: string;
+    modelMode?: AnalysisMode;
+    latency?: number;
+    fps?: number;
   };
 }
 
@@ -99,11 +107,13 @@ function createApiError(message: string, err: AxiosError): ApiError {
 /* -------------------------------------------------------------------------- */
 export async function uploadVideo(
   file: File,
+  mode: AnalysisMode = 'lite',
   cancelSource?: CancelTokenSource,
   onProgress?: (pct: number) => void
 ): Promise<AnalysisResult> {
   const formData = new FormData();
   formData.append('file', file);
+  formData.append('mode', mode);
 
   try {
     const response = await api.post<AnalysisResult>('/analyze/video', formData, {
@@ -129,12 +139,13 @@ export async function uploadVideo(
 /* -------------------------------------------------------------------------- */
 export async function analyzeText(
   text: string,
+  mode: AnalysisMode = 'lite',
   cancelSource?: CancelTokenSource
 ): Promise<AnalysisResult> {
   try {
     const response = await api.post<AnalysisResult>(
       '/analyze/text',
-      { text },
+      { text, mode },
       {
         headers: { 'Content-Type': 'application/json' },
         cancelToken: cancelSource?.token,
@@ -154,10 +165,12 @@ export async function analyzeText(
 /* -------------------------------------------------------------------------- */
 export async function analyzeTextFile(
   file: File,
+  mode: AnalysisMode = 'lite',
   cancelSource?: CancelTokenSource
 ): Promise<AnalysisResult> {
   const formData = new FormData();
   formData.append('file', file);
+  formData.append('mode', mode);
 
   try {
     const response = await api.post<AnalysisResult>('/analyze/text', formData, {
@@ -195,12 +208,13 @@ export async function checkHealth(
 /* analyzeFrame – POST /analyze/frame (live webcam)                           */
 /* -------------------------------------------------------------------------- */
 export async function analyzeFrame(
-  imageBase64: string
+  imageBase64: string,
+  mode: AnalysisMode = 'lite'
 ): Promise<FrameAnalysisResult> {
   try {
     const response = await api.post<FrameAnalysisResult>(
       '/analyze/frame',
-      { image: imageBase64 },
+      { image: imageBase64, mode },
       {
         headers: { 'Content-Type': 'application/json' },
       }

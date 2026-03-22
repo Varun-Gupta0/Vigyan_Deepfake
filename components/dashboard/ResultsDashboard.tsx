@@ -117,7 +117,7 @@ const ResultsDashboard: React.FC<Props> = ({ result }) => {
             <span style={{ fontSize: 16, fontWeight: 700, color: vc.color }}>{vc.label}</span>
           </div>
 
-          {'reason' in result && (
+          {m.modelMode !== 'pro' && 'reason' in result && (
             <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
               {result.reason}
             </p>
@@ -125,26 +125,138 @@ const ResultsDashboard: React.FC<Props> = ({ result }) => {
         </div>
       </div>
 
-      {/* Metrics */}
+      {/* Advanced Technical Panel */}
       <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
-        <p style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          Metrics
+        <p style={{
+          fontSize: 10,
+          color: 'var(--text-dim)',
+          marginBottom: 12,
+          textTransform: 'uppercase',
+          letterSpacing: '0.1em',
+          fontWeight: 600
+        }}>
+          Inference Telemetry
         </p>
-        {m.framesAnalyzed !== undefined && (
-          <Metric label="Frames analyzed" value={m.framesAnalyzed} />
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(3, 1fr)',
+          gap: 10,
+          marginBottom: 16
+        }}>
+          <div className="tech-stat">
+            <span className="stat-label">Model Mode</span>
+            <span className="stat-value" style={{
+              color: m.modelMode === 'pro' ? 'var(--blue)' : 'var(--green)',
+              textTransform: 'uppercase'
+            }}>
+              {m.modelMode || 'Lite'}
+            </span>
+          </div>
+
+          <div className="tech-stat">
+            <span className="stat-label">Latency (ms)</span>
+            <span className="stat-value">
+              {m.latency ? Math.round(m.latency) : (m.processingTime ? (m.processingTime * 1000).toFixed(0) : 'N/A')}
+            </span>
+          </div>
+
+          <div className="tech-stat">
+            <span className="stat-label">FPS</span>
+            <span className="stat-value">
+              {m.fps ? m.fps.toFixed(1) : (m.framesAnalyzed && m.processingTime ? (m.framesAnalyzed / m.processingTime).toFixed(1) : 'N/A')}
+            </span>
+          </div>
+
+          <div className="tech-stat">
+            <span className="stat-label">Faces Detected</span>
+            <span className="stat-value">
+              {m.facesDetected ?? (result.faces ? result.faces.length : 0)}
+            </span>
+          </div>
+
+          <div className="tech-stat" style={{ gridColumn: 'span 2' }}>
+            <span className="stat-label">Frames Analyzed</span>
+            <span className="stat-value">
+              {m.framesAnalyzed || 0}
+            </span>
+          </div>
+        </div>
+
+        {/* AI Reasoning Section (Pro Mode only) */}
+        {m.modelMode === 'pro' && result.reason && (
+          <div style={{
+            marginTop: 18,
+            padding: '14px 16px',
+            background: 'rgba(59, 130, 246, 0.05)',
+            border: '1px dashed var(--blue)',
+            borderRadius: 'var(--radius-sm)',
+            position: 'relative',
+            overflow: 'hidden'
+          }}>
+             <div style={{
+              position: 'absolute',
+              top: 0, left: 0, width: '3px', height: '100%',
+              background: 'var(--blue)'
+            }} />
+            <p style={{
+              fontSize: 10,
+              color: 'var(--blue)',
+              fontWeight: 800,
+              marginBottom: 6,
+              textTransform: 'uppercase',
+              letterSpacing: '0.08em',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6
+            }}>
+              <span style={{ fontSize: 12 }}>🧠</span> AI Reasoning
+            </p>
+            <p style={{
+              fontSize: 12.5,
+              color: 'var(--text)',
+              lineHeight: 1.6,
+              margin: 0,
+              fontStyle: 'italic',
+              opacity: 0.9
+            }}>
+              "{result.reason}"
+            </p>
+          </div>
         )}
-        {m.facesDetected !== undefined && (
-          <Metric label="Faces detected" value={m.facesDetected} />
-        )}
-        {m.processingTime !== undefined && (
-          <Metric label="Processing time" value={`${m.processingTime}s`} />
-        )}
-        <Metric label="Model" value={m.modelUsed} />
-        <Metric label="Device" value={m.inferenceDevice} />
-        {'phishing_score' in result && result.phishing_score !== undefined && (
-          <Metric label="Phishing score" value={`${result.phishing_score}%`} />
-        )}
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+          <Metric label="Inference" value={m.inferenceDevice} />
+          <Metric label="Base Model" value={m.modelUsed} />
+          {'phishing_score' in result && result.phishing_score !== undefined && (
+            <Metric label="Phishing Likelihood" value={`${result.phishing_score}%`} />
+          )}
+        </div>
       </div>
+
+      <style jsx>{`
+        .tech-stat {
+          background: rgba(255,255,255,0.03);
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          padding: 8px 10px;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .stat-label {
+          font-size: 9px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+        }
+        .stat-value {
+          font-size: 12px;
+          font-family: var(--font-mono);
+          font-weight: 600;
+          color: var(--text);
+        }
+      `}</style>
 
       {/* Detected Faces */}
       {'faces' in result && result.faces && result.faces.length > 0 && (

@@ -3,6 +3,7 @@ import { analyzeFrame, FrameAnalysisResult } from '@/lib/api';
 
 interface LiveStreamPanelProps {
   onAnalysisComplete?: (result: FrameAnalysisResult) => void;
+  mode: 'lite' | 'pro';
 }
 
 const CameraIcon = () => (
@@ -17,7 +18,7 @@ const StopIcon = () => (
   </svg>
 );
 
-const LiveStreamPanel: React.FC<LiveStreamPanelProps> = ({ onAnalysisComplete }) => {
+const LiveStreamPanel: React.FC<LiveStreamPanelProps> = ({ onAnalysisComplete, mode }) => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [latestResult, setLatestResult] = useState<FrameAnalysisResult | null>(null);
@@ -79,7 +80,7 @@ const LiveStreamPanel: React.FC<LiveStreamPanelProps> = ({ onAnalysisComplete })
     if (!imageBase64) return;
 
     try {
-      const result = await analyzeFrame(imageBase64);
+      const result = await analyzeFrame(imageBase64, mode);
       setLatestResult(result);
       drawBoundingBoxes(result);
       onAnalysisComplete?.(result);
@@ -94,7 +95,7 @@ const LiveStreamPanel: React.FC<LiveStreamPanelProps> = ({ onAnalysisComplete })
       frameCountRef.current = 0;
       lastFpsUpdateRef.current = now;
     }
-  }, [drawBoundingBoxes, onAnalysisComplete]);
+  }, [drawBoundingBoxes, onAnalysisComplete, mode]);
 
   const startStream = useCallback(async () => {
     try {
