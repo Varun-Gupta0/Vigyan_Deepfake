@@ -25,6 +25,11 @@ out/
 *.png
 real_monalisa.jpg
 path/
-build.log
-build.txt
-huh.txt
+*.log
+*.pth
+*.whl
+*.zip
+nul
+xception_model/
+.DS_Store
+ngrok.yml

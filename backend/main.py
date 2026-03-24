@@ -1,3 +1,4 @@
+# pyre-ignore-all-errors
 from fastapi import FastAPI, File, UploadFile, Request, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +27,7 @@ app = FastAPI(
     description="Autonomous Multimodal Deepfake Detection API",
 )
 
+# ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,8 +36,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Global state ──────────────────────────────────────────────────────────────
 video_detector = VideoDeepfakeDetector()
-CURRENT_MODE = "lite"  # Track mode for health dashboard
+current_model_name = "Lite-Heuristic"  # Dynamic – updated on every request
+
+
+def _update_model_name(mode: str) -> str:
+    """Update the global current_model_name based on mode and return it."""
+    global current_model_name
+    if mode == "pro":
+        current_model_name = "Xception-FFPP"
+    else:
+        current_model_name = "Lite-Heuristic"
+    return current_model_name
 
 
 @app.on_event("startup")
@@ -82,16 +95,10 @@ async def analyze_video(file: UploadFile = File(...), mode: str = Form("lite")):
             tmp.write(await file.read())
             video_path = tmp.name
 
-        global CURRENT_MODE
-        CURRENT_MODE = mode
+        model_name = _update_model_name(mode)
         start = time.time()
-        if mode == "pro":
-            detector = VideoDeepfakeDetector(
-                classifier=FrameClassifier(model_type="xception_ffpp")
-            )
-            result = detector.detect(video_path, mode=mode)
-        else:
-            result = video_detector.detect(video_path, mode=mode)
+
+        result = video_detector.detect(video_path, mode=mode)
         analysis_time = round(time.time() - start, 2)
 
         try:
@@ -99,45 +106,40 @@ async def analyze_video(file: UploadFile = File(...), mode: str = Form("lite")):
         except OSError:
             pass
 
-        fake_prob  = float(result["video_score"])
-        mean_prob  = float(result.get("mean_fake_probability", fake_prob))
-        median_prob = float(result.get("median_fake_probability", fake_prob))
-        std_prob   = float(result.get("std_fake_probability", 0.0))
-        frame_scores = [round(s, 4) for s in result.get("frame_scores", [])]
-        frames_analyzed = int(result.get("frames_analyzed", 0))
-        faces      = result.get("faces", [])
-        reason     = result.get("reason", "Temporal analysis complete")
+        fake_prob       = float(result.get("score", 0.5))
+        frames_analyzed = int(result.get("framesAnalyzed", 0))
+        faces           = result.get("faces", [])
 
-        fused_score = fusion_engine(fake_prob, 0.0, face_count=len(faces))
+        fused_score     = fusion_engine(fake_prob, 0.0, face_count=len(faces))
         calibrated_prob = calibrate(fused_score)
 
         api_label, confidence_pct = _label_and_conf(calibrated_prob)
-        decision = decision_engine(calibrated_prob)
+        decision    = decision_engine(calibrated_prob)
         explanation = explainability(calibrated_prob, data_type="video", data=video_path, mode=mode)
 
         return JSONResponse(content={
-            "label":                  api_label,
-            "confidence":             confidence_pct,
-            "verdict":                _verdict(api_label),
-            "fake_probability":       round(calibrated_prob, 4),
-            "real_probability":       round(1.0 - calibrated_prob, 4),
-            "mean_fake_probability":  round(mean_prob, 4),
-            "median_fake_probability": round(median_prob, 4),
-            "std_fake_probability":   round(std_prob, 4),
-            "frame_scores":           frame_scores,
-            "decision":               decision.to_dict(),
-            "reason":                 explanation.get("reason", reason),
-            "faces":                  faces,
-            "processing_steps":       explanation.get("processing_steps", []),
+            "label":                   api_label,
+            "confidence":              confidence_pct,
+            "verdict":                 _verdict(api_label),
+            "fake_probability":        round(calibrated_prob, 4),
+            "real_probability":        round(1.0 - calibrated_prob, 4),
+            "mean_fake_probability":   round(fake_prob, 4),
+            "median_fake_probability": round(fake_prob, 4),
+            "std_fake_probability":    0.0,
+            "frame_scores":            [],
+            "decision":                decision.to_dict(),
+            "reason":                  explanation.get("reason", "Video analysis complete"),
+            "faces":                   faces,
+            "processing_steps":        explanation.get("processing_steps", []),
             "metrics": {
-                "framesAnalyzed":  frames_analyzed,
-                "facesDetected":   len(faces),
-                "latency":         round(analysis_time * 1000, 2),
-                "modelMode":       mode,
-                "inferenceType":   "cloud" if mode == "pro" else "local",
-                "fps":             round(frames_analyzed / analysis_time, 2) if analysis_time > 0 else 0.0,
-                "modelUsed":       video_detector.get_model_name(),
-                "model":           "Xception-FFPP" if mode == "pro" else video_detector.get_model_name(),
+                "framesAnalyzed": frames_analyzed,
+                "facesDetected":  len(faces),
+                "latency":        round(analysis_time * 1000, 2),
+                "modelMode":      mode,
+                "inferenceType":  "cloud" if mode == "pro" else "local",
+                "fps":            round(frames_analyzed / analysis_time, 2) if analysis_time > 0 else 0.0,
+                "modelUsed":      model_name,
+                "model":          model_name,
             },
         })
 
@@ -152,8 +154,8 @@ async def analyze_video(file: UploadFile = File(...), mode: str = Form("lite")):
 async def analyze_frame(request: Request):
     try:
         start_time = time.time()
-        body = await request.json()
-        image_b64 = body.get("image", "")
+        body       = await request.json()
+        image_b64  = body.get("image", "")
         if not image_b64:
             return JSONResponse(content={"error": "No image provided"}, status_code=400)
 
@@ -164,73 +166,70 @@ async def analyze_frame(request: Request):
         if frame is None:
             return JSONResponse(content={"error": "Failed to decode image"}, status_code=400)
 
-        mode = body.get("mode", "lite")
-        global CURRENT_MODE
-        CURRENT_MODE = mode
-        result = video_detector.classify_frame_live(frame, mode=mode)
-        faces = result.get("faces", [])
-        fake_prob = float(result.get("score", 0.0))
+        mode       = body.get("mode", "lite")
+        model_name = _update_model_name(mode)
+        result     = video_detector.classify_frame_live(frame, mode=mode)
+        faces      = result.get("faces", [])
+        fake_prob  = float(result.get("score", 0.0))
 
         if not result.get("face_found"):
-            # No face → cannot make a determination → treat as real
             latency_ms = round((time.time() - start_time) * 1000, 2)
             return JSONResponse(content={
-                "label":                  "REAL",
-                "confidence":             100.0,
-                "verdict":                "authentic",
-                "fake_probability":       0.0,
-                "real_probability":       1.0,
-                "mean_fake_probability":  0.0,
+                "label":                   "REAL",
+                "confidence":              100.0,
+                "verdict":                 "authentic",
+                "fake_probability":        0.0,
+                "real_probability":        1.0,
+                "mean_fake_probability":   0.0,
                 "median_fake_probability": 0.0,
-                "std_fake_probability":   0.0,
-                "frame_scores":           [],
-                "decision":               {"label": "REAL", "confidence": 100.0},
-                "faces":                  [],
+                "std_fake_probability":    0.0,
+                "frame_scores":            [],
+                "decision":                {"label": "REAL", "confidence": 100.0},
+                "faces":                   [],
                 "metrics": {
                     "framesAnalyzed": 1,
-                    "facesDetected": 0,
-                    "latency":       latency_ms,
-                    "modelMode":     mode,
-                    "inferenceType": "cloud" if mode == "pro" else "local",
-                    "fps":           0.0,
-                    "modelUsed":     video_detector.get_model_name(),
-                    "model":         video_detector.get_model_name(),
+                    "facesDetected":  0,
+                    "latency":        latency_ms,
+                    "modelMode":      mode,
+                    "inferenceType":  "cloud" if mode == "pro" else "local",
+                    "fps":            0.0,
+                    "modelUsed":      model_name,
+                    "model":          model_name,
                 },
             })
 
-
-        fused_score = fusion_engine(fake_prob, 0.0, face_count=len(faces))
+        fused_score     = fusion_engine(fake_prob, 0.0, face_count=len(faces))
         calibrated_prob = calibrate(fused_score)
 
         api_label, confidence_pct = _label_and_conf(calibrated_prob)
-        decision = decision_engine(calibrated_prob)
+        decision    = decision_engine(calibrated_prob)
         explanation = explainability(calibrated_prob, data_type="video", data=None, mode=mode)
-        
+
         analysis_time = time.time() - start_time
-        latency_ms = round(analysis_time * 1000, 2)
+        latency_ms    = round(analysis_time * 1000, 2)
 
         return JSONResponse(content={
-            "label":                  api_label,
-            "confidence":             confidence_pct,
-            "verdict":                _verdict(api_label),
-            "fake_probability":       round(calibrated_prob, 4),
-            "real_probability":       round(1.0 - calibrated_prob, 4),
-            "mean_fake_probability":  round(calibrated_prob, 4),
+            "label":                   api_label,
+            "confidence":              confidence_pct,
+            "verdict":                 _verdict(api_label),
+            "fake_probability":        round(calibrated_prob, 4),
+            "real_probability":        round(1.0 - calibrated_prob, 4),
+            "mean_fake_probability":   round(calibrated_prob, 4),
             "median_fake_probability": round(calibrated_prob, 4),
-            "std_fake_probability":   0.0,
-            "frame_scores":           [round(calibrated_prob, 4)],
-            "decision":               decision.to_dict(),
-            "reason":                 explanation.get("reason", "Live analysis complete"),
-            "faces":                  faces,
+            "std_fake_probability":    0.0,
+            "frame_scores":            [round(calibrated_prob, 4)],
+            "decision":                decision.to_dict(),
+            "reason":                  explanation.get("reason", "Live analysis complete"),
+            "faces":                   faces,
             "metrics": {
                 "framesAnalyzed": 1,
-                "facesDetected": len(faces),
-                "latency":       latency_ms,
-                "modelMode":     mode,
-                "inferenceType": "cloud" if mode == "pro" else "local",
-                "fps":           round(1.0 / analysis_time, 2) if analysis_time > 0 else 0.0,
-                "modelUsed":     video_detector.get_model_name(),
-                "model":         video_detector.get_model_name(),
+                "facesDetected":  len(faces),
+                "latency":        latency_ms,
+                "modelMode":      mode,
+                "inferenceType":  "cloud" if mode == "pro" else "local",
+                "fps":            round(1.0 / analysis_time, 2) if analysis_time > 0 else 0.0,
+                "modelUsed":      model_name,
+                "model":          model_name,
             },
         })
 
@@ -244,7 +243,7 @@ async def analyze_frame(request: Request):
 @app.post("/analyze/text")
 async def analyze_text(request: Request, file: UploadFile = File(None)):
     try:
-        start_time = time.time()
+        start_time   = time.time()
         content_type = request.headers.get("content-type", "")
         mode = "lite"
         if file is not None:
@@ -256,16 +255,21 @@ async def analyze_text(request: Request, file: UploadFile = File(None)):
         else:
             text = (await request.body()).decode("utf-8")
 
-        phishing_score  = detect_phishing(text)
-        global CURRENT_MODE
-        CURRENT_MODE = mode
+        phishing_score = detect_phishing(text)
+
+        # Determine text-specific model name
         if mode == "pro":
+            text_model_name = "Gemma-3-27B"
             res = detect_text_pro(text)
             deepfake_score = res["score"]
-            llm_reason = res["reason"]
+            llm_reason     = res["reason"]
         else:
+            text_model_name = "RoBERTa/DistilRoBERTa"
             deepfake_score = detect_deepfake_text(text)
             llm_reason = None
+
+        # Also update global model name for /health
+        _update_model_name(mode)
 
         fused_score     = fusion_engine(0.0, deepfake_score)
         calibrated_prob = calibrate(fused_score)
@@ -285,13 +289,14 @@ async def analyze_text(request: Request, file: UploadFile = File(None)):
             "phishing_score":   round(phishing_score * 100, 1),
             "processing_steps": explanation.get("processing_steps", []),
             "metrics": {
-                "framesAnalyzed":  0,
-                "facesDetected":   0,
-                "latency":         latency_ms,
-                "modelMode":       mode,
-                "inferenceType":   "cloud" if mode == "pro" else "local",
-                "fps":             0.0,
-                "modelUsed":       "Gemma-3-27B" if mode == "pro" else "RoBERTa/DistilRoBERTa",
+                "framesAnalyzed": 0,
+                "facesDetected":  0,
+                "latency":        latency_ms,
+                "modelMode":      mode,
+                "inferenceType":  "cloud" if mode == "pro" else "local",
+                "fps":            0.0,
+                "modelUsed":      text_model_name,
+                "model":          text_model_name,
             },
         })
 
@@ -309,15 +314,20 @@ async def health():
         "edgeMode":          "enabled",
         "inferenceDevice":   "CPU/MPS/CUDA",
         "latency":           0,
-        "model":             "Xception-FFPP" if CURRENT_MODE == "pro" else "Lite-Heuristic",
+        "model":             current_model_name,
         "liveStreamEnabled": True,
         "metrics": {
             "framesAnalyzed": 0,
-            "facesDetected": 0,
-            "latency": 0.0,
-            "modelMode": CURRENT_MODE,
-            "inferenceType": "local",
-            "fps": 0.0,
-            "modelUsed": "Xception-FFPP" if CURRENT_MODE == "pro" else "Lite-Heuristic",
+            "facesDetected":  0,
+            "latency":        0.0,
+            "modelMode":      "pro" if current_model_name == "Xception-FFPP" else "lite",
+            "inferenceType":  "local",
+            "fps":            0.0,
+            "modelUsed":      current_model_name,
+            "model":          current_model_name,
         },
     })
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)

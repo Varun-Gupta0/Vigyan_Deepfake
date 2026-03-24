@@ -227,7 +227,7 @@ const ResultsDashboard: React.FC<Props> = ({ result }) => {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
           <Metric label="Inference" value={m.inferenceDevice} />
-          <Metric label="Base Model" value={m.modelUsed} />
+          <Metric label="Base Model" value={(m as any).model || m.modelUsed} />
           {'phishing_score' in result && result.phishing_score !== undefined && (
             <Metric label="Phishing Likelihood" value={`${result.phishing_score}%`} />
           )}

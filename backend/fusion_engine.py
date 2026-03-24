@@ -1,3 +1,11 @@
+def calibrate(score):
+    if score > 0.7:
+        return min(1.0, score + 0.1)
+    elif score < 0.3:
+        return max(0.0, score - 0.1)
+    return score
+
+
 def fusion_engine(video_score, text_score, face_count=None):
     video_score = float(video_score) if video_score is not None else 0.0
     text_score = float(text_score) if text_score is not None else 0.0
@@ -16,5 +24,7 @@ def fusion_engine(video_score, text_score, face_count=None):
 
     if face_count is not None and face_count == 0 and has_video:
         fused = min(1.0, fused + 0.05)
+
+    fused = calibrate(fused)
 
     return max(0.0, min(1.0, fused))

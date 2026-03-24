@@ -20,7 +20,7 @@ const SystemStatus: React.FC = () => {
 
   useEffect(() => {
     fetchHealth();
-    const id = setInterval(fetchHealth, 10000);
+    const id = setInterval(fetchHealth, 5000);
     return () => clearInterval(id);
   }, [fetchHealth]);
 
